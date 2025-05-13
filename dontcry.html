@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8" />
+  <title>Pacing‑kalkylator v2</title>
+  <style>
+    body {font-family: Arial, sans-serif; max-width: 760px; margin: 2rem auto; line-height: 1.45}
+    input {margin: .3rem 0; padding: .45rem; width: 140px}
+    button {padding: .6rem 1.2rem; cursor: pointer}
+    table {border-collapse: collapse; width: 100%; margin-top: 1.4rem}
+    th, td {border: 1px solid #ccc; padding: .55rem; text-align: center}
+    thead {background: #f5f5f5}
+    .hint {font-size: .9rem; color: #555}
+  </style>
+</head>
+<body>
+  <h1>Don't Cr2</h1>
+  <ul>
+    <li><strong>Vikt</strong> (kg)</li>
+    <li><strong>Mål‑tid</strong> (MM:SS) för hela banan</li>
+    <li><strong>Max nedför‑fart</strong> som % av jämn fart (säkerhetsgräns)</li>
+  </ul>
+
+  <label>Vikt (kg):<br><input id="weight" type="number" min="30" max="200" step="0.1" value="70"></label><br>
+  <label>Mål‑tid (MM:SS):<br><input id="goalTime" type="text" placeholder="10:00"></label><br>
+  <label>Max nedför‑fart (% av jämn fart):<br>
+    <input id="maxFactor" type="number" min="105" max="200" step="5" value="115">
+  </label>
+  <span class="hint">Ex 115 % ⇒ max ~15 % snabbare än jämn fart.</span><br>
+
+  <button id="calcBtn">Räkna!</button>
+
+  <div id="results"></div>
+
+  <script>
+  // ======== Ban‑segment: distans (km) + höjdförändring (m) ========
+  const segments = [
+    {name: "Platt",  dist: 1.5, climb: 0},
+    {name: "Uppför", dist: 0.45, climb: 25},
+    {name: "Nerför", dist: 0.65, climb: -25},
+    {name: "Platt",  dist: 0.60, climb: 0}
+  ];
+
+  // ======== Minetti‑polynomen (J · kg⁻¹ · m⁻¹) ========
+  function metabolicCost(grade) {
+    // grade i = stigning (meter per meter), t.ex. 0.05 = 5 %
+    // Källa: Minetti et al. 2002, Running energetics
+    return 155.4*Math.pow(grade,5)
+         - 30.4*Math.pow(grade,4)
+         - 43.3*Math.pow(grade,3)
+         + 46.3*Math.pow(grade,2)
+         + 19.5*grade
+         + 3.6; // J · kg⁻¹ · m⁻¹
+  }
+
+  // ======== Hjälpfunktioner ========
+  const parseTime = t => {
+    const parts = t.trim().split(":").map(Number);
+    if (parts.some(isNaN)) return NaN;
+    return parts.length === 2 ? parts[0]*60 + parts[1] : parts[0];
+  };
+
+  const formatSec = sec => {
+    const m = Math.floor(sec/60);
+    const s = Math.round(sec%60).toString().padStart(2,"0");
+    return `${m}:${s}`;
+  };
+
+  const formatPace = speed => {
+    const pace = 1000/speed; // sek per km
+    const m = Math.floor(pace/60);
+    const s = Math.round(pace%60).toString().padStart(2,"0");
+    return `${m}:${s} min/km`;
+  };
+
+  // ======== Kärnlogik ========
+  document.getElementById("calcBtn").addEventListener("click", () => {
+    const weight = parseFloat(document.getElementById("weight").value);
+    const goal   = parseTime(document.getElementById("goalTime").value);
+    const maxFac = parseFloat(document.getElementById("maxFactor").value)/100;
+    if (!weight || !goal) { alert("Fyll i vikt och tid"); return; }
+
+    const totDist = segments.reduce((s,seg)=>s+seg.dist,0); // km
+    const flatSpeed = 1000*totDist/goal; // m/s för jämn fart
+
+    // ----- Strategi 1: jämn fart -----
+    const evenRows = segments.map(seg => {
+      const t = seg.dist*1000/flatSpeed;
+      return {...seg, time:t, speed:flatSpeed};
+    });
+
+    // ----- Strategi 2: jämn energikostnad per kg (Minetti) med fart‑tak -----
+    const denomSum = segments.reduce((sum,seg)=>{
+      const grade = seg.climb/(seg.dist*1000);
+      return sum + metabolicCost(grade)*seg.dist*1000; // J/kg
+    },0);
+
+    // Först okapad fördelning
+    const raw = segments.map(seg => {
+      const grade = seg.climb/(seg.dist*1000);
+      const cost  = metabolicCost(grade); // J/kg/m
+      const segEnergy = cost*seg.dist*1000; // J/kg
+      const time = goal * (segEnergy/denomSum); // proportionell mot energin
+      const speed = seg.dist*1000/time;
+      return {...seg, time, speed};
+    });
+
+    // ----- Fart‑tak i nedförssegment -----
+    const capped = [...raw];
+    let capChanged=false;
+    let cappedTime=0;
+    raw.forEach((seg,i)=>{
+      const maxSpeed = flatSpeed*maxFac;
+      if (seg.climb<0 && seg.speed>maxSpeed) {
+        capChanged=true;
+        const newSpeed = maxSpeed;
+        const newTime  = seg.dist*1000/newSpeed;
+        capped[i] = {...seg, speed:newSpeed, time:newTime};
+      }
+      cappedTime += capped[i].time;
+    });
+
+    if (capChanged) {
+      // Skala övriga segment för att matcha måltiden
+      const othersIdx = capped.map((_,i)=>i).filter(i=>capped[i].time===raw[i].time);
+      const otherRawTime = othersIdx.reduce((s,i)=>s+raw[i].time,0);
+      const adjust = goal - cappedTime;
+      if (Math.abs(adjust) > otherRawTime) {
+        alert("Tidsmål och fartgräns går inte ihop – höj gränsen eller ändra måltiden.");
+        return;
+      }
+      const scale = (otherRawTime + adjust) / otherRawTime;
+      othersIdx.forEach(i=>{
+        capped[i].time  = raw[i].time * scale;
+        capped[i].speed = segments[i].dist*1000/capped[i].time;
+      });
+    }
+
+    // ======== Bygg resultat‑tabell ========
+    let html='<table><thead><tr><th>Delsträcka</th><th>Dist (km)</th><th>Jämn fart<br>tid</th><th>Jämn fart<br>pace</th><th>Optimerad<br>tid</th><th>Optimerad<br>pace</th></tr></thead><tbody>';
+    segments.forEach((seg,i)=>{
+      html+=`<tr><td>${seg.name}</td><td>${seg.dist.toFixed(2)}</td><td>${formatSec(evenRows[i].time)}</td><td>${formatPace(evenRows[i].speed)}</td><td>${formatSec(capped[i].time)}</td><td>${formatPace(capped[i].speed)}</td></tr>`;
+    });
+    html+='</tbody></table>';
+    document.getElementById("results").innerHTML = html;
+  });
+  </script>
+</body>
+</html>
